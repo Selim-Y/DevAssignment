@@ -53,8 +53,11 @@ tzdesign2018 <- svydesign(id = ~CLUSTER, strata = ~STRATUM, weights = ~popwt, da
 
 
 
-library(dplyr)
 library(haven)
+library(dplyr)
+library(survey)
+library(tidyr)
+library(knitr)
 library(data.table)
 
 
@@ -147,3 +150,173 @@ res$year <- rep(yrs, each = nrow(res)/length(yrs))
 res[, c("headcount","poverty_gap","sq_poverty_gap")] <- lapply(res[, c("headcount","poverty_gap","sq_poverty_gap")], as.numeric)
 write.csv(res, "output/poverty_measures.csv", row.names = FALSE)
 print(head(res, 30))
+
+
+
+
+
+
+
+library(haven)
+
+files <- c("Datasets/Tanzania_2012.dta", "Datasets/Tanzania_2018.dta")
+
+for (f in files) {
+  df <- read_dta(f)
+  
+  # basic checks
+  if (!"cons" %in% names(df)) {
+    message("Skipping ", f, ": 'cons' not found.")
+    next
+  }
+  if (!"povline" %in% names(df)) {
+    message("Skipping ", f, ": 'povline' not found.")
+    next
+  }
+  
+  # make indicator: 1 if cons < povline, 0 otherwise; keep NA where input NA
+  df$below_pov <- ifelse(is.na(df$cons) | is.na(df$povline), NA,
+                         ifelse(df$cons < df$povline, 1, 0))
+  
+  # quick summary
+  n_total <- sum(!is.na(df$below_pov))
+  n_below <- sum(df$below_pov == 1, na.rm = TRUE)
+  prop_below <- if (n_total > 0) n_below / n_total else NA
+  
+  cat("\nFile:", f, "\n")
+  cat("Observations with cons & povline:", n_total, "\n")
+  cat("Households below poverty line:", n_below, "\n")
+  cat("Share below poverty line:", round(prop_below, 4), "\n")
+  
+  # save
+  out_csv <- sub("\\.dta$", "_with_poverty.csv", basename(f))
+  write.csv(df, out_csv, row.names = FALSE)
+  cat("Saved:", out_csv, "\n")
+  
+  
+  
+  
+  
+  
+  d <- read_dta("Datasets/Tanzania_2018.dta")
+  
+  # map STRATUM -> location
+  d$location <- ifelse(d$STRATUM %in% c(1, "1"), "rural",
+                       ifelse(d$STRATUM %in% c(2, "2"), "urban",
+                              ifelse(d$STRATUM %in% c(3, "3"), "dar es salaam", NA)))
+  
+  # keep households below poverty with children
+  sel <- (d$cons < d$povline) & !is.na(d$ch14) & d$ch14 > 0
+  d <- d[sel, , drop = FALSE]
+  if (nrow(d) == 0) stop("No households below poverty with children found.")
+  
+  # enrolled children by rule: educlevel_hhh >= 3 -> all ch14 enrolled, else 0
+  d$enrolled <- ifelse(d$educlevel_hhh >= 3, d$ch14, 0)
+  d$total   <- d$ch14
+  
+  # survey design (household weight)
+  svy <- svydesign(id = ~1, weights = ~hhweight, data = d)
+  
+  # weighted ratio by location x sex_hhh
+  res <- svyby(~enrolled, ~location + sex_hhh, svy, svyratio, denominator = ~total, na.rm = TRUE)
+  
+  # find estimate and se columns (robust)
+  group_cols <- c("location","sex_hhh")
+  est_col <- setdiff(names(res), group_cols)[1]
+  se_col_candidates <- grep(paste0("^", est_col, "(_se|\\.se$|__se$)"), names(res), value = TRUE)
+  if (length(se_col_candidates) == 0) se_col_candidates <- grep("(_se$|\\.se$|se$)", names(res), value = TRUE)
+  se_col <- if (length(se_col_candidates) > 0) se_col_candidates[1] else NA
+  
+  # build result df
+  res_df <- data.frame(
+    location = res$location,
+    sex = res$sex_hhh,
+    estimate = res[[est_col]],
+    se = if (!is.na(se_col)) res[[se_col]] else NA_real_,
+    stringsAsFactors = FALSE
+  )
+  res_df$percent <- 100 * res_df$estimate
+  res_df$se_pct  <- 100 * res_df$se
+  res_df$display <- ifelse(is.na(res_df$percent), NA, sprintf("%.1f (±%.1f)", res_df$percent, res_df$se_pct))
+  
+  # label sexes for columns
+  res_df$sex_label <- ifelse(res_df$sex %in% c(2,"2","F","f","Female","female"), "Female",
+                             ifelse(res_df$sex %in% c(1,"1","M","m","Male","male"), "Male",
+                                    as.character(res_df$sex)))
+  
+  # pivot wide (base R)
+  wide <- reshape(res_df[, c("location","sex_label","display")],
+                  idvar = "location", timevar = "sex_label",
+                  direction = "wide")
+  # tidy column names
+  names(wide) <- sub("^display\\.", "", names(wide))
+  
+  # ensure order
+  order_pref <- c("rural","urban","dar es salaam")
+  wide$location <- factor(wide$location, levels = order_pref)
+  wide <- wide[order(wide$location, na.last = TRUE), , drop = FALSE]
+  
+  # replace NA with "-"
+  wide[is.na(wide)] <- "-"
+  
+  # print table
+  print(wide, row.names = FALSE)
+  
+  # open viewer if interactive
+  if (interactive()) View(wide)
+  
+  
+  
+  d <- read_dta("Datasets/Tanzania_2018.dta")
+  
+  # keep only observations with treatment and outcome
+  d <- subset(d, !is.na(freebooks) & !is.na(inschool_later))
+  
+  # survey design using STRATUM as strata and hhweight as weight
+  svy <- svydesign(id = ~1, strata = ~STRATUM, weights = ~hhweight, data = d)
+  
+  # group means (control = freebooks==0, treat = freebooks==1)
+  group_means <- svyby(~inschool_later, ~freebooks, svy, svymean, na.rm = TRUE)
+  
+  # difference in means via linear survey regression (identity link)
+  fit <- svyglm(inschool_later ~ freebooks, design = svy, family = gaussian())
+  s <- summary(fit)
+  diff_est <- coef(fit)["freebooks"]                     # difference in proportions (treat - control)
+  diff_se  <- s$coef["freebooks","Std. Error"]
+  diff_p   <- s$coef["freebooks","Pr(>|t|)"]
+  
+  # prepare table: control mean, treatment mean, diff (pct points), SE and p-value
+  control_mean  <- as.numeric(group_means$inschool_later[group_means$freebooks == 0])
+  treat_mean    <- as.numeric(group_means$inschool_later[group_means$freebooks == 1])
+  tab <- data.frame(
+    group = c("Control","Treatment","Difference (T-C)"),
+    proportion = c(control_mean, treat_mean, diff_est),
+    se = c(NA, NA, diff_se),
+    p_value = c(NA, NA, diff_p),
+    stringsAsFactors = FALSE
+  )
+  # convert to percent for display
+  tab$percent <- round(100 * tab$proportion, 2)
+  tab$se_pct <- ifelse(is.na(tab$se), NA, round(100 * tab$se, 2))
+  
+  # print a simple table to console (screenshot this)
+  print(tab[, c("group","percent","se_pct","p_value")], row.names = FALSE)
+  
+  # build a short paragraph for the policy note and append it
+  paragraph <- sprintf(
+    "An RCT conducted in 2017 provided free school books to a random subset of children. In our analysis of later enrollment (inschool_later), the treatment group had %.2f%% enrolled vs %.2f%% in the control group, a difference of %.2f percentage points (SE = %.2f p = %.3f). This suggests that free books %s increase enrollment in this sample.",
+    100 * treat_mean,
+    100 * control_mean,
+    100 * diff_est,
+    100 * diff_se,
+    diff_p,
+    ifelse(diff_p < 0.05 & diff_est > 0, "did",
+           ifelse(diff_p < 0.05 & diff_est < 0, "reduced",
+                  "did not robustly"))
+  )
+  
+  cat("\n--- Findings paragraph (also appended to policy_note.txt) ---\n")
+  cat(paragraph, "\n")
+  
+  # append to policy note file
+  cat("\n", paragraph, file = "policy_note.txt", append = TRUE)
