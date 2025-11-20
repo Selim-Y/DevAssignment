@@ -54,8 +54,10 @@ tzdesign2018 <- svydesign(id = ~CLUSTER, strata = ~STRATUM, weights = ~popwt, da
 
 
 library(dplyr)
+library(tidyr)
 library(haven)
 library(data.table)
+library(survey)
 
 
 dt1 <- as.data.table(read_dta("Datasets/Tanzania_2012.dta"))
@@ -147,3 +149,128 @@ res$year <- rep(yrs, each = nrow(res)/length(yrs))
 res[, c("headcount","poverty_gap","sq_poverty_gap")] <- lapply(res[, c("headcount","poverty_gap","sq_poverty_gap")], as.numeric)
 write.csv(res, "output/poverty_measures.csv", row.names = FALSE)
 print(head(res, 30))
+
+
+
+
+#---GROUP DATA ASSIGNMENT 2 STARTS HERE
+#PLEASE RELOAD THE LIBRARIES IF YOU HAVE NOT ARLEADY
+
+
+
+
+
+file_path <- "Datasets/Tanzania_2018_new-3.dta"
+
+# read
+Tanzania_2018_below_pov <- read_dta(file_path)
+
+# create below_pov: 1 if cons < povline, 0 if cons >= povline
+Tanzania_2018_below_pov$below_pov <- ifelse(Tanzania_2018_below_pov$cons < Tanzania_2018_below_pov$povline, 1, 0)
+
+# write back (overwrite)
+write_dta(Tanzania_2018_below_pov, file_path)
+
+
+
+
+
+
+# below-poverty households and valid observations in age 7-18
+sel <- (Tanzania_2018_below_pov$cons < Tanzania_2018_below_pov$povline) & !is.na(Tanzania_2018_below_pov$inschool) & !is.na(Tanzania_2018_below_pov$male) & !is.na(Tanzania_2018_below_pov$rural) & !is.na(Tanzania_2018_below_pov$age) & Tanzania_2018_below_pov$age >= 7 & Tanzania_2018_below_pov$age <= 18
+Tanzania_2018_below_pov <- Tanzania_2018_below_pov[sel, , drop = FALSE]
+
+# create age group variable
+Tanzania_2018_below_pov$agegrp <- ifelse(Tanzania_2018_below_pov$age >= 7 & Tanzania_2018_below_pov$age <= 12, "7-12", "13-18")
+
+# survey design using household weight
+svy <- svydesign(id = ~1, weights = ~hhweight, data = Tanzania_2018_below_pov)
+
+# weighted mean of inschool by rural + male + agegrp
+res <- svyby(~inschool, ~rural + male + agegrp, svy, svymean, na.rm = TRUE)
+
+# identify estimate and se columns robustly
+group_cols <- c("rural","male","agegrp")
+est_col <- setdiff(names(res), group_cols)[1]
+se_col_candidates <- grep(paste0("^", est_col, "(_se|\\.se$|__se$)"), names(res), value = TRUE)
+if (length(se_col_candidates) == 0) se_col_candidates <- grep("(_se$|\\.se$|se$)", names(res), value = TRUE)
+se_col <- if (length(se_col_candidates) > 0) se_col_candidates[1] else NA
+
+# build result frame and labels
+res_df <- data.frame(
+  rural = res$rural,
+  male = res$male,
+  agegrp = res$agegrp,
+  estimate = res[[est_col]],
+  se = if (!is.na(se_col)) res[[se_col]] else NA_real_,
+  stringsAsFactors = FALSE
+)
+
+wide <- res_df %>%
+  mutate(
+    # map codes to readable labels (rural: 1 => "rural", else "urban")
+    location = if_else(rural %in% c(1, "1", TRUE), "rural", "urban"),
+    sex = if_else(male %in% c(1, "1", TRUE), "Male", "Female"),
+    # percent and se in percentage points
+    percent = 100 * estimate,
+    se_pct  = 100 * se,
+    # formatted display string
+    display = sprintf("%.1f (±%.1f)", percent, se_pct),
+    # combined column name
+    colname = paste(sex, agegrp)
+  ) %>%
+  select(location, colname, display) %>%
+  pivot_wider(names_from = colname, values_from = display) %>%
+  # ensure order: urban then rural
+  mutate(location = factor(location, levels = c("urban", "rural"))) %>%
+  arrange(location)
+
+
+# print result
+print(wide)
+
+View(wide)
+
+
+
+
+
+
+
+
+
+# keep observations with treatment and outcome
+Tanzania_2018_below_pov <- subset(Tanzania_2018_below_pov, freebooks & inschool_later)
+
+# survey design: use STRATUM
+
+  svy <- svydesign(id = ~1, strata = ~STRATUM, weights = ~hhweight, data = Tanzania_2018_below_pov)
+
+
+# group means (proportions) by free books (0 = control, 1 = treatment)
+grp <- svyby(~inschool_later, ~freebooks, svy, svymean, na.rm = TRUE)
+
+# difference in means via linear survey regression
+fit <- svyglm(inschool_later ~ freebooks, design = svy, family = gaussian())
+s <- summary(fit)
+
+# extract numbers
+control_mean <- as.numeric(grp$inschool_later[grp$freebooks == 0])
+treat_mean   <- as.numeric(grp$inschool_later[grp$freebooks == 1])
+diff_est     <- coef(fit)["freebooks"]
+diff_se      <- s$coef["freebooks","Std. Error"]
+diff_p       <- s$coef["freebooks","Pr(>|t|)"]
+
+# prepare and print compact table
+tab <- data.frame(
+  group = c("Control (freebooks=0)", "Treatment (freebooks=1)", "Difference (T - C)"),
+  proportion = c(control_mean, treat_mean, diff_est),
+  se = c(NA, NA, diff_se),
+  p_value = c(NA, NA, diff_p),
+  stringsAsFactors = FALSE
+)
+tab$percent <- round(100 * tab$proportion, 2)
+tab$se_pct  <- ifelse(is.na(tab$se), NA, round(100 * tab$se, 2))
+
+
+print(tab[, c("group","percent","se_pct","p_value")])
