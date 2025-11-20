@@ -171,8 +171,8 @@ Tanzania_2018_below_pov$below_pov <- ifelse(Tanzania_2018_below_pov$cons < Tanza
 # write back (overwrite)
 write_dta(Tanzania_2018_below_pov, file_path)
 
-
-
+mean(Tanzania_2018_below_pov$below_pov) * 100
+  
 
 
 
