@@ -104,10 +104,6 @@ land_col <- "pricem2"
 dist_col <- "distcbd"
 pop_col  <- "popdens" 
 
-needed <- c(mun_col, land_col, dist_col)
-miss <- needed[!needed %in% names(data)]
-if (length(miss) > 0) stop("Missing columns: ", paste(miss, collapse = ", "))
-
 # small cleaning and flags
 data <- data[!is.na(data[[land_col]]) & !is.na(data[[dist_col]]), ]
 data$is_eindhoven <- ifelse(data[[mun_col]] == target_city, 1, 0)
@@ -184,19 +180,8 @@ tab <- do.call(rbind, rows)
 numcols <- setdiff(names(tab), "variable")
 tab[numcols] <- round(tab[numcols], 3)
 
-# Add a short plain-language interpretation column (ELI5)
-interpret <- sapply(seq_len(nrow(tab)), function(i) {
-  r <- tab[i, ]
-  if (startsWith(as.character(r$variable), "log_")) {
-    paste0("Typical (original units) ≈ ", r$backtrans_from_log,
-           "; median log = ", r$median)
-  } else {
-    paste0("Median = ", r$median, "; geom. mean = ", r$geom_mean)
-  }
-})
-tab$short_note <- interpret
 
-# Print nicely and save
+# Print
 print(tab, row.names = FALSE)
 
 
@@ -206,4 +191,4 @@ summary(model_loglevel)
 
 model_loglevelpop <- lm(log_land ~ dist_c * is_eindhoven + log_popdens, data = data)
 summary(model_loglevelpop)
-                     
+                    
