@@ -6,9 +6,9 @@
 ############################################################
 
 # If you need to install these package comment out command below
-# install.packages("tidyverse")
-# install.packages("stargazer")
-# install.packages("sjPlot")
+install.packages("tidyverse")
+install.packages("stargazer")
+install.packages("sjPlot")
 
 # Use packages
 library(stargazer)
@@ -16,7 +16,7 @@ library(tidyverse)
 library(sjPlot) # for plotting with ggplot2 from tidyverse package
 
 # Read in Data
-data <- read_csv(file = "monocentric_2016.csv")
+data <- read_csv(file = "Datasets/monocentric_2016.csv")
 
 # Labels of data are as follows
                       # pc4 = "Zipcode",
